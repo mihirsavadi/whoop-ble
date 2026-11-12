@@ -3,12 +3,21 @@
 A tiny, dependency-light toolkit for talking to a **WHOOP 5.0** band
 directly over Bluetooth LE — no WHOOP app, no WHOOP servers, no Xcode.
 
-All protocol knowledge here is reverse-engineered, primarily by the
-[**Goose**](https://github.com/b-nnett/goose) project (archived alpha), which
-mined the WHOOP Android APK and built on
-[OpenWHOOP](https://github.com/pywebguru/OpenWHOOP) (the WHOOP 4.0 effort).
-This repo distills that into one README, one CLI, and a set of bridges that
-make it usable against a real band.
+All protocol knowledge here is reverse-engineered - no official docs exist.
+Two upstreams, both credited throughout:
+
+- **[NOOP](https://github.com/ryanbr/noop)** (active) - the production-grade
+  successor ecosystem (iOS/Android/macOS companion app, r/NoopBand) with a
+  versioned protocol reference; now the primary source for command matrices,
+  sensor-record layouts, alarms, configuration and ECG.
+- **[Goose](https://github.com/b-nnett/goose)** (archived) - the original
+  WHOOP 5.0 reverse-engineering this repo started from (frame format, UUIDs,
+  event names, the captured hello), built on
+  [OpenWHOOP](https://github.com/pywebguru/OpenWHOOP) and the WHOOP 4.0 lineage.
+
+This repo distills both into one README, one CLI, and a set of bridges that
+make it usable against a real band - with an automated canary watching both
+upstreams for new discoveries.
 
 > **Not affiliated with WHOOP.** Product name is used only to describe
 > compatibility. Writing commands to your own health device is at your own
