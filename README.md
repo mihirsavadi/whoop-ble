@@ -591,11 +591,16 @@ whoop-ble/
 │                              builder, parsers, CRCs). Everything imports this.
 ├── dashboard.py            ← browser dashboard frontend to any bridge
 │                              (launched via `whoop_ble.py dashboard`)
+├── upstream_check.py       ← canary checker (run by the workflow; also
+│                              runnable locally against the live API)
+├── .github/workflows/       ← upstream-watch.yml (weekly, opens an issue
+│                              labeled upstream-watch when an upstream moves)
 ├── bridges/                ← every transport that turns a radio into a gateway:
 │   ├── android-bridge/       ← ★ the working route (native app, adb forward)
 │   ├── bridge_server.py      ← phone-browser route (needs Web Bluetooth)
 │   └── pi_gateway.py         ← Linux/BlueZ route (pair + serve)
 ├── certs/                  ← self-signed HTTPS cert (gitignored, private key!)
+├── captures/               ← historical capture files (gitignored runtime data)
 └── .gitignore
 ```
 

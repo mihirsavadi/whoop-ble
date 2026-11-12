@@ -1032,11 +1032,17 @@ function pollState() {
     dl.style.display = (cap.frames > 0) ? '' : 'none';
   }).catch(() => { document.getElementById('status').textContent = 'dashboard server down?'; });
 }
+const DEADLY = /^(forget_bonds|force_trim|set_read_pointer|reboot_strap|power_cycle_strap)$/;
 function category(name) {
-  if (/^get_/.test(name)) return ['Reads', 'read'];
-  if (/alarm/.test(name)) return ['Alarms', 'alarm'];
-  if (/historical|high_freq/.test(name)) return ['Historical sync', 'sync'];
-  if (/clock/.test(name)) return ['Clock', 'clock'];
+  if (DEADLY.test(name)) return ['DANGEROUS - service', 'alarm'];
+  if (/alarm|haptic/.test(name)) return ['Alarms & haptics', 'alarm'];
+  if (/historical|high_freq|data_range/.test(name)) return ['Historical sync', 'sync'];
+  if (/clock|advertising|wear_detection|led_accessibility|body_location/.test(name)) return ['Device & identity', 'clock'];
+  if (/config|_ff$|_ff_|afe|gyro|signal_processing/.test(name)) return ['Configuration', 'clock'];
+  if (/ecg|labrador|wrist/.test(name)) return ['ECG (MG only)', 'sync'];
+  if (/battery/.test(name)) return ['Battery & power', 'read'];
+  if (/raw_data|ble_uart/.test(name)) return ['Raw data', 'stream'];
+  if (/^get_|^link_valid/.test(name)) return ['Reads', 'read'];
   return ['Stream toggles', 'stream'];
 }
 async function sendCmd(name, payload) {
@@ -1045,6 +1051,10 @@ async function sendCmd(name, payload) {
   if (p === null) { p = prompt('payload hex required for ' + name); if (!p) return; }
   const safe = /^get_/.test(name) || name === 'link_valid';
   if (!safe && !confirm(`Send ${name} (payload ${p})?\n\n${entry[2]}`)) return;
+  if (DEADLY.test(name) &&
+      prompt(`"${name}" is flagged DANGEROUS.\nType the command name exactly to send:`) !== name) {
+    mini(`aborted ${name} - typed confirmation failed`); return;
+  }
   const r = await api('/api/send', {method: 'POST', body: JSON.stringify({name, payload: p})});
   mini(`send ${name} → ${JSON.stringify(r)}`);
 }
