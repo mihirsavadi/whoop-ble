@@ -2,7 +2,10 @@
 """
 whoop_ble.py — single-file CLI for talking to a WHOOP 5.0 band over Bluetooth LE.
 
-Protocol knowledge reverse-engineered by the Goose project (github.com/b-nnett/goose),
+Protocol knowledge reverse-engineered — no official docs exist. Two
+upstreams, both credited: NOOP (github.com/ryanbr/noop, active; primary
+source for commands/sensors/alarms/config) and Goose
+(github.com/b-nnett/goose, archived; frame format, UUIDs, event names),
 which itself drew on OpenWHOOP and the WHOOP Android APK. This repo is not
 affiliated with WHOOP. Use at your own risk.
 
@@ -479,7 +482,7 @@ async def cmd_commands(args):
 def main():
     parser = argparse.ArgumentParser(
         description="WHOOP 5.0 BLE toolkit - single-file CLI. "
-                    "Protocol from github.com/b-nnett/goose. Not affiliated with WHOOP.")
+                    "Protocol from NOOP (github.com/ryanbr/noop) + Goose (github.com/b-nnett/goose). Not affiliated with WHOOP.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add_ble_options(p, listen_default=30):

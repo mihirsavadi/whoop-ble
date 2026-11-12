@@ -562,17 +562,33 @@ the captured hello), `find_whoop`, `connect_to_whoop`, `parse_hr_measurement`,
 
 ## Known unknowns / open research
 
-- **Sleep stages, respiratory rate, SpO2, wrist temp, strain scores** — raw
-  packets exist in the historical sync (type 47); semantics undecoded
-  upstream (Goose `RemainingDataTodo.md`). Bulk historical pull not yet
-  exercised end-to-end (pointers ✅, the type-47 dance is scripted).
-- **Type-40 realtime frame fields** — 1 Hz stream confirmed; embedded
-  values (HR candidate bytes, timestamps) partially identified, exact
-  field layout TBD.
-- **Tap/gesture detection** — event frames (type 48, candidate event id
-  14) observed at suspicious times; tap-channel hypothesis untested.
-- **`84` body-location payload format**; **clock commands** (slow-ACK,
-  responses may arrive as events rather than type-36).
+Genuinely open (per NOOP's remaining-boundaries notes + our own gaps):
+
+- **Sleep stages / hypnogram** — R18's motion state (WAKE/STILL/SLEEP/UP)
+  is band classification, not sleep architecture; no light/deep/REM mapping
+  exists on the wire so far. Respiratory rate likewise unmapped.
+- **Strain / recovery scores** — not protocol features; they'd be
+  client-side computation over the decoded records (this is where a
+  dashboard could grow its own analytics).
+- **ECG absolute timing/voltage calibration** (MG) — raw R16/R17 records
+  decode, physical calibration unresolved (NOOP).
+- **Historical bulk pull end-to-end** — scripted and now spec-correct
+  (token-echo acks, persist-before-ack), but not yet exercised against
+  a real band; R18 decode is wired but unproven on live data.
+- **R18 tail semantics** — most of the 124-byte record beyond the mapped
+  fields (75/77/79 status words, optical pairs) stays raw by design;
+  unmapped ≠ meaningless.
+- **Bootloader acceptance, some runtime/error interactions** (NOOP
+  50.42.1.0 baseline caveats).
+
+Recently closed (kept for context):
+
+- ~~Type-40 field layout~~ — decoded (NOOP) and **verified against our own
+captured frames** (78 bpm + RR ms); the dashboard renders it live
+- ~~SpO₂~~ — ruled **not on the wire** for 5.0/MG
+- ~~Skin temperature / steps / activity~~ — mapped in R18 by NOOP
+- ~~Tap detection~~ — confirmed: `DOUBLE_TAP` = event id 14, observed live
+- ~~Cmd 84 payload~~ — documented: `01` (revision) → `[1,0,255,on_body]`
 
 ## Open problems
 
@@ -696,8 +712,9 @@ format — only the transport differs). The response-format tables above
 - `build_v5_frame(1, 145, b"\x01")` MUST produce
   `aa0108000001e67123019101363e5c8d`. Regression test:
   `python.exe whoop_ble.py frame 1 145 01`.
-- All constants come from Goose (see Upstream tracking). Do not invent
-  command numbers or payloads; only add what upstream documents.
+- All constants come from the two upstreams (NOOP primary, Goose
+  original — see Upstream tracking). Do not invent command numbers or
+  payloads; only add what an upstream documents, and credit which one.
 
 ### Integrating new upstream findings (checklist)
 

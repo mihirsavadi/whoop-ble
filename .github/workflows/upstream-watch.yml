@@ -1,7 +1,8 @@
 name: upstream-watch
 
-# Weekly canary for the Goose upstream (b-nnett/goose). If the upstream
-# revives, pushes commits, or a fork becomes active, this opens/comments
+# Weekly canary for both upstreams of this repo's protocol knowledge:
+# ryanbr/noop (active — new releases) and b-nnett/goose (archived —
+# revival, active forks). On the first signal it opens/comments
 # an issue in THIS repo (label: upstream-watch) — so anyone watching
 # whoop-ble gets pinged. Also runnable manually via workflow_dispatch.
 
@@ -34,7 +35,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh label create upstream-watch --color 0e8a16 \
-            --description "Automated canary: activity in the upstream Goose repo" || true
+            --description "Automated canary: activity in the NOOP/Goose upstream repos" || true
           EXISTING=$(gh issue list --label upstream-watch --state open \
                      --json number --jq '.[0].number' 2>/dev/null || true)
           if [ -n "$EXISTING" ]; then
@@ -42,7 +43,7 @@ jobs:
             gh issue comment "$EXISTING" --body-file .github/upstream-report.md
           else
             gh issue create \
-              --title "Upstream Goose activity detected — check for new protocol knowledge" \
+              --title "Upstream activity detected (NOOP/Goose) — check for new protocol knowledge" \
               --label upstream-watch \
               --body-file .github/upstream-report.md
           fi

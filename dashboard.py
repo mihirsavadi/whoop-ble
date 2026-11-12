@@ -21,9 +21,11 @@ Panels:
   * Historical grab  — walks the page-pointer sync dance and lets you
                        download what the band streamed
 
-Name tables (event names, result codes, haptics statuses, packet domains)
-are from the Goose project's Rust core (Rust/core/src/protocol.rs and
-GooseBLEClient+Parsing.swift) — see README credits.
+Name tables and decoders come from both upstreams (see README credits):
+event names, result codes, haptics statuses and packet domains from the
+Goose project's Rust core (protocol.rs, Parsing.swift); packet-40/R18
+record layouts, alarm validation details and configuration keys from
+NOOP's protocol reference (docs/PROTOCOL_*.md).
 """
 
 import argparse
