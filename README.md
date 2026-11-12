@@ -24,6 +24,39 @@ upstreams for new discoveries.
 > risk — everything here is reverse-engineered, not documented or supported
 > by the manufacturer.
 
+1. [whoop-ble](#whoop-ble)
+   1. [First principles: what a WHOOP 5.0 actually is (BLE-wise)](#first-principles-what-a-whoop-50-actually-is-ble-wise)
+   2. [Why the bridges exist](#why-the-bridges-exist)
+   3. [Status: verified against a real band](#status-verified-against-a-real-band)
+   4. [Quick start](#quick-start)
+   5. [Protocol reference](#protocol-reference)
+      1. [BLE endpoints](#ble-endpoints)
+      2. [Frame format (V5)](#frame-format-v5)
+      3. [Packet types (first payload byte)](#packet-types-first-payload-byte)
+      4. [Command responses (type 36) — decoded live](#command-responses-type-36--decoded-live)
+      5. [Strap events (type 48) — name table (from Goose `protocol.rs`)](#strap-events-type-48--name-table-from-goose-protocolrs)
+      6. [Data packets — live \& historical record layouts (NOOP, verified where noted)](#data-packets--live--historical-record-layouts-noop-verified-where-noted)
+      7. [Command catalog](#command-catalog)
+   6. [The bridges](#the-bridges)
+      1. [1. Native Android bridge (`bridges/android-bridge/`) — the working route](#1-native-android-bridge-bridgesandroid-bridge--the-working-route)
+      2. [2. Phone-browser bridge (`bridges/bridge_server.py`) — same idea, via Chrome](#2-phone-browser-bridge-bridgesbridge_serverpy--same-idea-via-chrome)
+      3. [3. Linux gateway (`bridges/pi_gateway.py`) — the pairing front](#3-linux-gateway-bridgespi_gatewaypy--the-pairing-front)
+   7. [The dashboard (`dashboard.py`, via `whoop_ble.py dashboard`)](#the-dashboard-dashboardpy-via-whoop_blepy-dashboard)
+   8. [CLI reference (`whoop_ble.py`)](#cli-reference-whoop_blepy)
+   9. [Known unknowns / open research](#known-unknowns--open-research)
+   10. [Open problems](#open-problems)
+   11. [Credits](#credits)
+   12. [Upstream tracking (notifications, all wired up)](#upstream-tracking-notifications-all-wired-up)
+   13. [Appendix: for AI agents](#appendix-for-ai-agents)
+       1. [Repo map (it's tiny — read everything)](#repo-map-its-tiny--read-everything)
+       2. [Execution environment gotchas](#execution-environment-gotchas)
+       3. [Where things live in `whoop_ble.py`](#where-things-live-in-whoop_blepy)
+       4. [Ground truth you must not break](#ground-truth-you-must-not-break)
+       5. [Integrating new upstream findings (checklist)](#integrating-new-upstream-findings-checklist)
+       6. [Live-testing procedure (band present)](#live-testing-procedure-band-present)
+       7. [Safety rules for agents](#safety-rules-for-agents)
+
+
 ---
 
 ## First principles: what a WHOOP 5.0 actually is (BLE-wise)
