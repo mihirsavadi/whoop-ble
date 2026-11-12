@@ -82,29 +82,40 @@ name `WHOOP 5AG0047324`, MTU 247).
 |---|---|
 | Scan / connect / standard GATT reads (PC-direct) | ✅ works |
 | **Custom service access via the phone's bond** | ✅ works — hello, streams, alarms, storage pointers all confirmed |
-| Handshake (`get_hello`) | ✅ returns serial number + device key hash + current Unix timestamp |
-| Live vitals stream (`toggle_realtime_hr`) | ✅ 1 Hz type-40 realtime frames on `fd4b0005` |
+| Handshake (`get_hello`, 145) | ✅ returns serial number + device key hash + current Unix timestamp |
+| Live vitals stream (`toggle_realtime_hr`) | ✅ 1 Hz type-40 frames on `fd4b0005` |
+| **Type-40 decode: live HR + R-R intervals** | ✅ **decoded** (NOOP layout, verified against our captured frames: 78 bpm + RR ms) — the dashboard shows it live |
 | **Alarms + haptics** (`set_alarm_time` + `run_alarm`) | ✅ **physically felt on a wrist** — band reported `SUCCESSFUL_PLAY` |
 | Battery pack info (`get_battery_pack_info`) | ✅ returns pack serial `WBB5AP0606717` |
-| Historical storage pointers (`get_data_range`) | ✅ returns page pointers (ring-buffer pages) |
-| Bulk historical download (`send_historical_data` flow) | ⏳ pointers work; the pull dance is scripted but not yet exercised |
-| Standard `0x2A37` heart rate | ⚠️ subscribes, stays silent on this band — live HR arrives via the custom type-40 frames instead |
+| Historical storage cursors (`get_data_range`) | ✅ 65-byte body: ring boundary, read/write/ack cursors, capacity, estimates, 4 clock pairs (NOOP layout) |
+| Bulk historical download (`send_historical_data` flow) | ⏳ scripted; ack now echoes the HISTORY_END token verbatim and only after disk persistence |
+| Standard `0x2A37` heart rate | ⚠️ subscribes, stays silent on this band — live HR arrives via type-40 frames instead |
 | **Tap detection** | ✅ confirmed — `DOUBLE_TAP` arrives as event frames (type 48, event id 14) |
-| Optical debug reads (`40/42/44`), ext. battery (`98`), research packet (`132`) | ⛔ band replies `UNSUPPORTED` on this firmware |
-| Body location (`84`) | ❌ replies `FAILURE` — likely needs a revision payload byte; format TBD |
-| Clock write/read (`10`/`11`) | ⏳ stalled the ATT write-ACK ~10 s when tried; unverified |
-| Packet semantics (sleep stages, SpO2, temp, strain) | 🕳️ undecoded upstream (Goose TODO) |
+| Optical debug reads (`40/42/44`), ext. battery (`98`), research (`132`) | ⛔ `UNSUPPORTED` on 5/MG — these are WHOOP-4-only commands (88 IDs are `U` on 50.42.1.0 and return result 3) |
+| Body location (`84`) | 📖 needs `revision:u8=1` — response `[1,0,255,on_body]` (NOOP); our earlier bare-payload FAILURE explained |
+| R18 biometric summary (HR, skin temp, steps, activity, motion state) | 📖 fully mapped by NOOP; not yet seen in our captures (historical pull pending) |
+| SpO₂ | 📖 **not on the wire** for 5.0/MG (NOOP: raw red/IR scalars exist but are not percentages) |
+| Sleep stages | 🕳️ still open: R18's motion state (WAKE/STILL/SLEEP/UP) is band state, **not** a hypnogram |
 
-Operational quirks discovered live:
+Operational quirks discovered live (ours) + documented (NOOP):
 
-- **Alarm slots are 1-based** — slot 0 returns `INVALID_ALARM_ID`; slot 1
-  works. Waveform `[47,152]` is a valid effect pair.
+- **Alarm slots are 1–6** — slot 0 returns `INVALID_ALARM_ID`; waveform
+  bytes must be ≤ 251; overall-repeat < 8 and counts pulses **after the
+  first** (N−1); the record is 21 bytes with a **crescendo** byte at the
+  end (our 20-byte payload worked because frame padding supplied the zero)
+- `run_alarm` **clears the saved record** — it is not a nondestructive
+  preview; disable is `[2, ID]` per slot or `[2, 255]` for all six
+- **HISTORY_END ack (cmd 23)** must echo the 8-byte token from
+  `frame[21:29]` verbatim, prefixed with `01` — and only after persisting,
+  because the ack advances the band's trim boundary and may release
+  stored device history
 - Some commands (`63`, `11`, `98`) make the band **delay the ATT
   write-response ~10 s**. The Android app has a write watchdog that
   recovers; expect this when scripting.
+- High-freq sync (96) revision 2: period must be strictly > 60,
+  duration < 28 800 s
 - The band streams battery-pack telemetry unprompted (puffin event frames
-  carrying the pack serial).
-- Band clock is Unix-epoch synced (frame timestamps are Unix seconds).
+  carrying the pack serial); band clock is Unix-epoch synced
 
 ---
 
@@ -257,69 +268,73 @@ arrived one per tap:
 | 11 | BLE_CONNECTION_UP | 56–60 | alarm lifecycle / HAPTICS_FIRED |
 | 12 | BLE_CONNECTION_DOWN | 63/96–98/100/109/123 | battery / sync / firmware events |
 
-### Data packets (types 40/43/47/51/52) — domain table
+### Data packets — live & historical record layouts (NOOP, verified where noted)
 
-Data-packet frames carry `packet_k` at frame[10], status at frame[11],
-counter/page u32le at frame[12], timestamp u32le at frame[16] (layout from
-Goose `parse_data_packet_payload`). Known `packet_k` domains: `9/12/18/24`
-normal history (HR-marked), `10/21` raw motion, `16` raw ECG, `17` R17
-optical-filtered, `19/22` research, `25/26` pulse information, `7/20`
-legacy/counted. Our live 1 Hz stream shows `packet_k = 80` (domain unknown —
-likely the realtime vitals domain; not in Goose's table).
+**Packet 40 — live HR + R-R** (✅ verified against our captured frames):
+
+| Offset | Width | Field |
+|---:|---:|---|
+| 10 | u32 | Unix-seconds timestamp |
+| 14 | u16 | additional time field (scale unresolved) |
+| 16 | u8 | **heart rate, bpm** |
+| 17 | u8 | declared R-R count |
+| 18+2i | u16 | R-R ticks, 1/1024 s → ms = `(ticks*1000+512)//1024` |
+
+**Type 47/43 layout selector at byte 9** (Goose called it `packet_k`):
+`18` R18 biometric summary, `20` R20 optical blocks, `21` R21 IMU,
+`22` R22 queued channels (versioned 2–9), `26` R26 compact optical,
+`16/17` ECG (MG); types 51/52 are dedicated IMU streams. For R18/R20/R21/R26:
+record index u32 at 11, Unix seconds u32 at 15.
+
+**R18 biometric summary** (124 bytes) — the biometric goldmine:
+
+| Offset | Field |
+|---:|---|
+| 22 / 23, 24+2i | HR bpm / R-R count + words (1/1024 s) |
+| 41, 45/49/53 | dynamic acceleration f32 + gravity x/y/z f32 (g) |
+| 57 / 63 | step counter (hw; sw override at 61) / activity: 0 still, 1 walk, 2 run |
+| 69, 71 / 73 | auxiliary thermal channels (raw/10 °C) / **skin temperature (raw/100 °C)** |
+| 81 bits 4–5 | motion/rest state: **0 WAKE, 1 STILL, 2 SLEEP, 3 UP** (band state, not a hypnogram) |
+| 106–109 | optical baseline/amplitude-like raw pairs (quality sentinels, not SpO₂) |
+
+**Data range (cmd 34) final body** — 65 bytes: revision 1 + 16×u32: ring
+boundary A, read cursor B, write cursor C, ack/trim boundary D, wrap state,
+capacity, record-count estimate, derived `15×(adjD + cap − adjC)`, and four
+clock pairs (boundary/trim/read/last-written pages).
 
 ### Command catalog
 
-Frames are `[35, seq, cmd, payload...]`; names match `whoop_ble.py send`.
-"Verified" = exercised against the author's band.
+Frames are `[35, seq, cmd, payload...]`; names match `whoop_ble.py send`
+(run `commands` for the live 70-entry list with payloads). The catalog
+now covers the full documented 5/MG set (NOOP matrix: 71 supported /
+88 unsupported on 50.42.1.0 — unsupported IDs return result 3).
+Deliberately **excluded** from the catalog: firmware image transfer
+(83, 142–144) and certificate/authorization commands (155–159,
+incl. `LOCK_DEVICE`) — no update path is implemented here.
 
-**Handshake & live vitals**
+Highlights and corrections from the NOOP sync:
 
-| # | CLI name | Payload | What it does | |
-|---|---|---|---|---|
-| 145 | `get_hello` | `01` | handshake | ✅ verified |
-| 3 | `toggle_realtime_hr` | `01` on / `00` off | live vitals stream (1 Hz type-40 frames) | ✅ verified |
-| 63 | `send_r10_r11_realtime` | `01` / `00` | R10/R11 realtime stream | ⏳ ACK slow |
-| 106 | `toggle_imu_mode` | `0101` / `0100` | IMU/accelerometer stream | untested |
-| 107 | `enable_optical_data` | `0101` / `0100` | optical/PPG data | untested |
-| 108 | `toggle_optical_mode` | `0101` / `0100` | optical sensor mode | untested |
-| 153/154 | `toggle_persistent_r20/r21` | `0101` / `0100` | persistent sensor modes | untested |
-
-**Historical sync (page-pointer protocol)**
-
-| # | CLI name | Payload | What it does | |
-|---|---|---|---|---|
-| 34 | `get_data_range` | — | storage page pointers | ✅ verified |
-| 22 | `send_historical_data` | — | stream stored pages (type-47 bursts) | untested |
-| 23 | `historical_data_result` | `0100000000000000` | ack receipt; advances pointers | untested |
-| 96 | `enter_high_freq_sync` | `02` + u16le×2 | fast sync mode | untested |
-| 97 | `exit_high_freq_sync` | — | leave fast sync | untested |
-
-**Clock & alarms**
-
-| # | CLI name | Payload | What it does | |
-|---|---|---|---|---|
-| 11 | `get_clock` | — | read strap clock | ⏳ ACK slow |
-| 10 | `set_clock` | u32le sec + u32le subsec | set strap clock | untested |
-| 67 | `get_alarm_time` | `04` + id | read alarm (empty slots: no data) | ✅ ACKed |
-| 66 | `set_alarm_time` | `04` id u32sec u16subsec + 8-byte waveform + u16le loop + u8 overall + u8 duration | set alarm | ✅ verified |
-| 68 | `run_alarm` | `02` + id | play it now | ✅ **felt it** |
-| 69 | `disable_alarm` | `0200ff` | disable all alarms | untested |
-
-WHOOP-default haptic pattern: waveform `[47,152,0,0,0,0,0,0]`, loop 0,
-overall 7, duration 30 s. **Alarm IDs are 1-based.**
-
-**Debug / research reads**
-
-| # | CLI name | Payload | | |
-|---|---|---|---|---|
-| 84 | `get_body_location_and_status` | — | ❌ FAILURE (payload format TBD) | |
-| 98 | `get_extended_battery_info` | — | ⛔ UNSUPPORTED | |
-| 151 | `get_battery_pack_info` | `01` | ✅ pack serial | |
-| 40/42/44 | `get_led_drive` / `get_tia_gain` / `get_bias_offset` | — | ⛔ UNSUPPORTED | |
-| 121 | `get_device_config_value` | `01` + 32-byte key | untested (no known keys) | |
-| 128 | `get_feature_flag_value` | `01` + 32-byte key | untested | |
-| 105 | `toggle_imu_mode_historical` | explicit payload | untested | |
-| 132 | `get_research_packet` | — | ⛔ UNSUPPORTED | |
+- **84** `get_body_location_and_status`: payload `01` (revision byte) →
+  response `[1,0,255,on_body]` — fixes our bare-payload FAILURE
+- **23** `historical_data_result`: **no fixed payload** — must echo the
+  8-byte HISTORY_END token from `frame[21:29]` with prefix `01`, only
+  after local persistence (⚠ the ack may release device history)
+- **66** alarm record is 21 bytes (adds a crescendo byte); alarm IDs 1–6;
+  validation detail codes match the haptics table (2=effect, 3=loops,
+  4=duration, 10=time, 11=id)
+- **68** RUN clears the saved record; pending `[2,0]` → success `[2,5]`
+- **19** `run_haptic_pattern`: ad-hoc buzz without an alarm slot —
+  `[01, 8 effects, u16 loop, u8 overall]`; **122** `stop_haptics` stops it
+- **146/147** are the current clock SET/GET (10/11 deprecated)
+- **115/116 & 117/118**: enumerate the 8 device-config keys and 25 feature
+  flags by name — the previously-unknown 32-byte keys are now documented
+  (e.g. `sigproc_wear_detect`, `cont_collection_mode`, `enable_r22_packets`,
+  `disable_pip_r26_packets`)
+- **148** worn-state override, **149** LED accessibility, **140/141**
+  custom advertising name, **26** battery (u32 %), **81/82** raw-data
+  capture start/stop, **1** link check
+- Sensitive, in-catalog but loud: **15** forget_bonds, **25** force_trim,
+  **33** set_read_pointer, **29/32** reboot/power-cycle
 
 ---
 
@@ -527,40 +542,38 @@ the captured hello), `find_whoop`, `connect_to_whoop`, `parse_hr_measurement`,
 
 ## Credits
 
-- **[Goose](https://github.com/b-nnett/goose)** — the WHOOP 5.0 BLE
-  reverse-engineering (Swift + Rust PoC). Nearly every constant here comes
-  from its source.
-- **[OpenWHOOP](https://github.com/pywebguru/OpenWHOOP)** — the WHOOP 4.0
-  reverse-engineering project Goose references.
+- **[NOOP](https://github.com/ryanbr/noop)** (ryanbr/noop) — the active,
+  production-grade successor ecosystem (iOS/Android/macOS companion app,
+  r/NoopBand). Its versioned protocol reference (`docs/PROTOCOL_*.md`,
+  50.42.1.0 baseline) is now the primary source for command matrices,
+  sensor-record layouts, alarms, configuration namespaces and ECG —
+  most of the "brought up to speed" knowledge here. License: **PolyForm
+  Noncommercial** (protocol facts referenced and credited; no code copied).
+- **[Goose](https://github.com/b-nnett/goose)** (b-nnett/goose, archived) —
+  the original WHOOP 5.0 BLE reverse-engineering (Swift + Rust PoC) this
+  repo started from; frame format, UUIDs, event names, the captured hello.
+- **[OpenWHOOP](https://github.com/pywebguru/OpenWHOOP)** and
+  `johnmiddleton12/my-whoop` — the WHOOP 4.0 lineage both build on.
 
 ## Upstream tracking (notifications, all wired up)
 
-Upstream is the source of truth for new protocol knowledge — and the repo
-now has an **automated canary** plus manual watch points, so revival or
-successor activity finds you:
+**Two upstreams now, both watched by the automated canary**
+(`.github/workflows/upstream-watch.yml`, weekly Monday 12:00 UTC + manual
+dispatch):
 
-**Automated (built in):** `.github/workflows/upstream-watch.yml` runs
-weekly (Mondays 12:00 UTC, also manually via *workflow_dispatch*). It
-checks three signals — upstream HEAD movement, the archived flag
-flipping, and **forks with recent pushes** (successor-project
-candidates) — and when something moves it opens/comments an issue in
-*this* repo labeled `upstream-watch` (deduped, state committed by CI).
-**Watch this repo** (GitHub → Watch → All activity) and you get pinged
-the moment there's anything to integrate. The integration checklist is
-in the agent appendix below.
+- **ryanbr/noop (ACTIVE)** — watched for **new releases** (the integration
+  points); HEAD recorded for reference. Watch the repo itself for
+  commit-level news; a new release triggers the canary issue.
+- **b-nnett/goose (ARCHIVED)** — watched for revival (HEAD movement,
+  archived-flag flip) and **forks with recent pushes** (successor
+  candidates; 5 were active in the last 30 days at time of writing).
 
-**Manual, if you want more:**
-* Watch the upstream directly: <https://github.com/b-nnett/goose> →
-  Watch → Custom (commits + releases) — fires if it's ever unarchived
-* Upstream commit feed (RSS):
-  <https://github.com/b-nnett/goose/commits/main.atom> — subscribe in
-  any feed reader
-* Fork network, sorted by recent activity — where a successor project
-  will show up first: <https://github.com/b-nnett/goose/forks?include=active>
-
-For context: upstream is currently **ARCHIVED** (read-only) — but at
-the time of writing, 5 forks have pushed within the last 30 days, so
-the ecosystem is alive.
+When either moves, the canary opens/comments an issue in *this* repo
+labeled `upstream-watch` — **watch this repo** (GitHub → Watch → All
+activity) to get pinged. Manual watch points: the NOOP releases page,
+<https://github.com/b-nnett/goose/commits/main.atom> (RSS), and
+<https://github.com/b-nnett/goose/forks?include=active>.
+Integration checklist lives in the agent appendix below.
 
 ---
 
@@ -641,19 +654,32 @@ format — only the transport differs). The response-format tables above
 
 ### Integrating new upstream findings (checklist)
 
-1. Find the constant in Goose source:
-   - Command numbers & payloads: `GooseSwift/GooseBLEClient.swift`
-     (enums `SensorStreamCommandKind`, `HistoricalCommandKind`,
-     `AlarmCommandKind`, `ClockCommandKind`, `debugResearchCommandDefinitions`)
-   - Packet types & parsing: `Rust/core/src/protocol.rs`
-   - Undecoded semantics: `docs/goose-swift-mvp/RemainingDataTodo.md`
-   - Alarm/haptics response parsing: `GooseBLEClient+Parsing.swift`
-     (`commandResultName`, `hapticsAlarmStatusName`)
+1. Find the constant upstream — **NOOP first** (active, versioned), then
+   Goose (frozen but byte-exact):
+   - **NOOP** `docs/PROTOCOL_*.md`: `PROTOCOL_COMMANDS.md` (canonical
+     matrix, every ID 1–159 with S/U status), `PROTOCOL_SENSORS.md`
+     (packet-40, R18/R20/R21/R22/R26 layouts), `PROTOCOL_ALARMS.md`,
+     `PROTOCOL_CONFIGURATION.md` (named keys), `PROTOCOL_TRANSPORT.md`
+     (range/battery/history contracts), `PROTOCOL_ECG.md`. Mind the
+     **PolyForm Noncommercial license**: reference and credit the facts,
+     do not copy code.
+   - **Goose**: `GooseSwift/GooseBLEClient.swift` (command enums),
+     `Rust/core/src/protocol.rs` (parsers, `strap_event_name`,
+     `data_packet_domain`), `GooseBLEClient+Parsing.swift`
+     (`commandResultName`, `hapticsAlarmStatusName`,
+     `historicalDataResultPayload` — the byte-exact ack-echo offsets).
 2. Add to `COMMAND_CATALOG` in `whoop_ble.py`
    (`"name": (number, default_payload_hex_or_None, "description")`).
-3. Add to the README catalog tables (with a verdict column).
-4. New packet type → `PACKET_TYPE_NAMES` + README packet table.
-5. Verify offline (`commands`, `send <name> --dry-run`).
+3. Update the README status/catalog sections with the new knowledge and
+   its source (ours-live-verified vs documented).
+4. New packet type → `TYPE_NAMES` (dashboard.py) + README packet table;
+   new record layout → dashboard `enrich_entry` decoder + README tables.
+5. Verify offline (`commands`, `send <name> --dry-run`), then the hello
+   regression: `python.exe whoop_ble.py frame 1 145 01` →
+   `aa0108000001e67123019101363e5c8d`.
+6. Live-test via the phone bridge if available; record observed type-36
+   responses in the README response tables, and update the status table
+   at the top.
 6. Live-test via the phone bridge if available; record the type-36
    response in the README response tables.
 7. Update the status table.
@@ -686,10 +712,19 @@ format — only the transport differs). The response-format tables above
 
 - Never send `set_*`/state-changing commands (clock, alarms, sensor
   toggles) without explicit user confirmation for that specific command.
-- Reads (`get_*`) and the hello are safe.
+- Reads (`get_*`), `link_valid` and the hello are safe.
 - `toggle_*` commands change what the band is streaming — confirm first,
   and always know the matching OFF payload.
-- `disable_alarm` (`0200ff`) disables **all** the user's alarms — never
-  send it without explicit consent.
+- **`historical_data_result` is the most dangerous command in the
+  catalog**: the payload must echo the HISTORY_END token verbatim
+  (`01` + `frame[21:29]`), sent only after durable local persistence —
+  it advances the band's trim boundary and can release stored history.
+  Never synthesize or reuse a token.
+- `run_alarm` clears the saved alarm record; `disable_alarm` `[2,255]`
+  clears all six slots — never without explicit consent.
+- **Never send**: `forget_bonds`, `force_trim`, `set_read_pointer`,
+  power/reboot commands, or anything from the excluded image-transfer /
+  certificate families (83, 142–144, 155–159) without explicit,
+  informed user consent for that exact command.
 - Do not remove or alter the disclaimers (not affiliated / at your own
   risk).

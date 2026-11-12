@@ -71,35 +71,90 @@ PACKET_TYPE_NAMES = {
 # if a payload is mandatory, one-line description). Payloads are hex WITHOUT the
 # leading sequence/command bytes.
 COMMAND_CATALOG = {
-    "get_hello":                  (145, "01", "pairing/handshake hello (known-good frame)"),
-    "toggle_realtime_hr":         (3,   "01", "enable live HR stream; 00 disables"),
-    "send_r10_r11_realtime":      (63,  "01", "enable R10/R11 realtime stream; 00 disables"),
-    "get_clock":                  (11,  "",    "read the strap's clock"),
-    "set_clock":                  (10,  None,  "set strap clock; payload = u32le seconds + u32le subseconds"),
-    "get_data_range":             (34,  "",    "read historical storage page pointers"),
-    "send_historical_data":       (22,  "",    "request bulk historical data stream"),
-    "historical_data_result":     (23,  "0100000000000000", "ack historical packet receipt"),
-    "enter_high_freq_sync":      (96,  None,  "payload = 02 + u16le interval + u16le duration (seconds)"),
-    "exit_high_freq_sync":        (97,  "",    "leave high-frequency sync mode"),
-    "set_alarm_time":             (66,  None,  "payload = 04 id u32le sec u16le subsec + 8 waveform + u16le loop + u8 overall + u8 duration"),
-    "get_alarm_time":             (67,  "04",  "payload = 04 + alarm id"),
-    "run_alarm":                  (68,  "02",  "payload = 02 + alarm id"),
-    "disable_alarm":              (69,  "0200ff", "disable all alarms"),
-    "get_body_location_and_status": (84, "",   "body placement / strap status"),
-    "get_research_packet":        (132, "",    "generic research packet read"),
-    "get_extended_battery_info":  (98,  "",    "battery state beyond standard GATT"),
-    "get_battery_pack_info":      (151, "01",  "battery pack info, revision 1"),
-    "get_led_drive":              (40,  "",    "optical LED drive configuration"),
-    "get_tia_gain":               (42,  "",     "optical transimpedance amp gain"),
-    "get_bias_offset":            (44,  "",     "optical bias offset"),
-    "toggle_imu_mode":            (106, "0101", "enable IMU/accelerometer stream; 0100 disables"),
-    "toggle_imu_mode_historical": (105, None,  "historical IMU toggle (explicit payload required)"),
-    "enable_optical_data":        (107, "0101", "enable optical/PPG data; 0100 disables"),
-    "toggle_optical_mode":        (108, "0101", "enable optical sensor mode; 0100 disables"),
-    "toggle_persistent_r20":      (153, "0101", "persistent sensor mode R20; 0100 disables"),
-    "toggle_persistent_r21":      (154, "0101", "persistent sensor mode R21; 0100 disables"),
-    "get_device_config_value":    (121, None,  "payload = 01 + 32-byte config key"),
-    "get_feature_flag_value":     (128, None,  "payload = 01 + 32-byte feature-flag key"),
+    # --- handshake / link / identity -------------------------------------
+    "get_hello":                (145, "01", "handshake; reproduces the known-good hello frame"),
+    "link_valid":               (1,   "",    "link check; fixed 13-byte NUL ack (not identity)"),
+    "set_clock":                (146, None,  "set strap clock (new high-number pair; see NOOP transport contract)"),
+    "get_clock":                (147, "",    "read strap clock (new pair; older 10/11 deprecated)"),
+    "get_advertising_name":     (141, "01",  "read the custom advertising name (rev 1; 19-byte body)"),
+    "set_advertising_name":     (140, None,  "payload = 01 + len + name[0..15]; stores the advertising name"),
+    "get_body_location_and_status": (84, "01", "rev 1; response [1,0,255,on_body] - 0/1 on-body status"),
+    "set_wear_detection_override": (148, None, "payload = 01 + override: 01 forces worn, 00 restores detection"),
+    "set_led_accessibility":    (149, None,  "payload = 01 + enabled(0/1); persistent LED option"),
+    "set_signal_processing_configuration": (138, None, "payload = 01 + selector(0-8); preset meanings undocumented"),
+
+    # --- live streams ------------------------------------------------------
+    "toggle_realtime_hr":       (3,   "01",  "enable live HR+RR stream (type 40); 00 disables"),
+    "toggle_generic_hr_profile": (14,  "01",  "nonvolatile standard-GATT HR policy; 00 off"),
+    "send_event_packets":       (48,  "01",  "event delivery toggle; 00 off"),
+    "toggle_imu_mode":          (106, "0101", "IMU/accelerometer stream; 0100 off"),
+    "toggle_imu_mode_historical": (105, None, "historical IMU toggle (explicit payload required)"),
+    "enable_optical_data":      (107, "0101", "optical/PPG data; 0100 off"),
+    "toggle_optical_mode":      (108, "0101", "optical sensor mode; 0100 off"),
+    "toggle_persistent_r20":    (153, "0101", "persistent R20 optical blocks; 0100 off"),
+    "toggle_persistent_r21":    (154, "0101", "persistent R21 IMU records; 0100 off"),
+    "start_raw_data":           (81,  None,  "raw data capture start (see NOOP raw-data guide for payload)"),
+    "stop_raw_data":            (82,  None,  "raw data capture stop"),
+    "disable_ble_uart":         (103, "01",  "acks a BLE UART disable (rev 1); async - no readback contract"),
+    "send_r10_r11_realtime":    (63,  "01",  "W4-only R10/R11 realtime stream (UNSUPPORTED on 5/MG)"),
+
+    # --- historical sync ---------------------------------------------------
+    "get_data_range":            (34,  "",    "storage cursors; 65-byte body: ring A, read B, write C, ack D, capacity, estimates, 4 clock pairs"),
+    "send_historical_data":      (22,  "",    "request historical stream; 00 aborts (cmd 20 also aborts)"),
+    "abort_historical_transmit": (20,  "00",  "abort an in-flight historical transfer (not a trim)"),
+    "historical_data_result":     (23,  None,  "WARNING: payload = 01 + the 8 echoed HISTORY_END bytes, ONLY after local commit - acks may RELEASE device history"),
+    "enter_high_freq_sync":      (96,  None,  "payload = 02 + u16le period(>60) + u16le duration(<28800); emits events 96/97"),
+    "exit_high_freq_sync":       (97,  "",    "leave fast sync; emits event 98"),
+
+    # --- alarms & haptics ---------------------------------------------------
+    "get_alarm_time":           (67, "04",  "payload = 04 + alarm id (1-6); returns the 21-byte record"),
+    "set_alarm_time":           (66, None,  "21-byte record: 04 id u32sec u16subsec(1/32768) + 8 effects(<=251) + u16 loop + u8 overall(<8) + u8 duration + u8 crescendo(0/1)"),
+    "run_alarm":                (68, "02",  "payload = 02 + id; pending [2,0] then success [2,5]; RUN CLEARS the saved record"),
+    "disable_alarm":            (69, None,  "payload = 02 + id, or 02ff for ALL SIX - destructive to saved schedules"),
+    "run_haptic_pattern":        (19, None,  "ad-hoc buzz, no alarm slot: payload = 01 + 8 effects(<=251) + u16 loop + u8 overall(pulses after the first)"),
+    "stop_haptics":             (122, "01",  "stop an in-progress haptic pattern (rev 1)"),
+
+    # --- configuration (named keys; see NOOP PROTOCOL_CONFIGURATION.md) ----
+    "start_device_config_key_exchange": (115, "01", "resets enumeration cursor; returns device-key count"),
+    "send_next_device_config":  (116, "01", "advances the shared cursor; enumerates the 8 device keys"),
+    "start_ff_key_exchange":    (117, "01", "same for the 25 feature-flag keys"),
+    "send_next_ff":             (118, "01", "advance the feature-flag cursor"),
+    "set_device_config_value":  (119, None, "payload = 01 + 32-byte key + value"),
+    "set_ff_value":             (120, None, "payload = 01 + 32-byte key + value"),
+    "get_device_config_value":  (121, None, "payload = 01 + 32-byte key (names in NOOP docs: sigproc_wear_detect, cont_collection_mode, ...)"),
+    "get_ff_value":             (128, None, "payload = 01 + 32-byte key (enable_r22_packets, disable_pip_r26_packets, ...)"),
+    "set_afe_parameters":       (61,  None,  "analog front-end write"),
+    "get_afe_parameters":       (62,  None,  "analog front-end read"),
+    "set_gyro_mode":            (150, None,  "gyro mode write"),
+    "get_gyro_mode_status":     (152, None,  "gyro mode read"),
+
+    # --- ECG (MG hardware only) ----------------------------------------------
+    "select_wrist":             (123, None,  "ECG wrist selection (MG)"),
+    "toggle_labrador_data_generation": (124, None, "ECG data generation (MG)"),
+    "toggle_labrador_raw_save": (125, None,  "ECG raw save (MG)"),
+    "send_raw_ecg":             (126, None,  "raw ECG stream (MG)"),
+    "save_filtered_ecg":        (127, None,  "filtered ECG save (MG)"),
+    "toggle_labrador_filtered": (139, None,  "ECG filtered toggle (MG)"),
+
+    # --- battery / power ------------------------------------------------------
+    "get_battery_level":        (26,  "00",  "battery; final body u32 whole percent; async on current firmware"),
+    "get_battery_pack_info":    (151, "01",  "battery pack info (rev 1); cached, not a live query"),
+    "get_extended_battery_info": (98, "",    "W4-only on 50.42.1.0 (returns UNSUPPORTED on 5/MG)"),
+
+    # --- service / sensitive (confirm carefully!) ----------------------------
+    "forget_bonds":             (15,  "",    "DANGEROUS: clears the band's bond table - breaks the phone until re-paired"),
+    "force_trim":               (25,  None,  "DANGEROUS: mutates history ownership; recovery unresolved"),
+    "set_read_pointer":         (33,  None,  "DANGEROUS: moves the history read cursor"),
+    "reboot_strap":            (29,  "",    "reboots the band; connection drops"),
+    "power_cycle_strap":        (32,  "",    "power-cycle request; async, state retention unresolved"),
+
+    # --- legacy / W4-only reads (kept for reference) --------------------------
+    "get_led_drive":            (40,  "",    "W4-only (UNSUPPORTED on 5/MG)"),
+    "get_tia_gain":             (42,  "",    "W4-only (UNSUPPORTED on 5/MG)"),
+    "get_bias_offset":          (44,  "",    "W4-only (UNSUPPORTED on 5/MG)"),
+    "get_research_packet":      (132, "",    "W4-only (UNSUPPORTED on 5/MG)"),
+    "get_protocol_version":     (75,  "",    "W4-only"),
+    "get_hardware_info":         (6,  "",    "W4-only"),
 }
 
 # ---------------------------------------------------------------------------

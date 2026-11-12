@@ -14,3 +14,4 @@ app/build/
 *.apk
 dashboard_run.log
 sweep_tmp.py
+captures/

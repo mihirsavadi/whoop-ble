@@ -420,15 +420,51 @@ def enrich_entry(e):
         ts = u32le(b, 12)
         if ts:
             e["event_unix"] = ts
-    elif ptype == 49 and len(b) >= 12:          # sync metadata
+    elif ptype == 49 and len(b) >= 11:          # sync metadata
+        kind = b[10]   # single byte for type 49 (u16 at [10:12] only for type 56)
+        e["meta"] = META_NAMES.get(kind, f"meta_{kind}")
+        if kind == 2 and len(b) >= 29:
+            e["end_token"] = b[21:29].hex()   # 8-byte ack token — echo verbatim
+    elif ptype == 56 and len(b) >= 12:          # puffin metadata: u16 kind
         kind = u16le(b, 10)
         e["meta"] = META_NAMES.get(kind, f"meta_{kind}")
-    elif ptype in (40, 43, 47, 51, 52) and len(b) >= 16:  # data packets
+    elif ptype == 40 and len(b) >= 18:            # live HR + R-R (NOOP layout, verified live)
+        e["packet_unix"] = u32le(b, 10)
+        e["hr"] = b[16]
+        n = b[17]
+        rr = [round(struct.unpack_from("<H", b, 18 + 2 * i)[0] * 1000 / 1024)
+              for i in range(n) if 18 + 2 * i + 2 <= len(b) - 4]
+        if rr:
+            e["rr_ms"] = rr
+    elif ptype == 43 and len(b) > 10:             # live sensor data; layout selector at 9
+        k = b[9]
+        e["packet_k"] = k
+        e["domain"] = {16: "raw ECG (R16)", 17: "filtered ECG (R17)"}.get(
+            k, DOMAIN_NAMES.get(k))
+    elif ptype in (47, 51, 52) and len(b) >= 16:  # historical / IMU packets
         k = b[10]
         e["packet_k"] = k
         e["domain"] = DOMAIN_NAMES.get(k)
         e["page"] = u32le(b, 12)
         e["packet_unix"] = u32le(b, 16)
+        if ptype == 47 and k == 18 and len(b) >= 75:   # R18 biometric summary
+            e["r18"] = True
+            e["packet_unix"] = u32le(b, 15) or e["packet_unix"]
+            e["hr"] = b[22] if b[22] else None
+            aux = (u16le(b, 69), u16le(b, 71))
+            e["aux_temp_c"] = [round(v / 10, 1) for v in aux if v is not None]
+            st = u16le(b, 73)
+            if st is not None:
+                e["skin_temp_c"] = round(st / 100, 2)
+            steps = u16le(b, 57)
+            if steps is not None:
+                e["steps"] = steps
+            act = {0: "still", 1: "walk", 2: "run"}.get(b[63])
+            if act:
+                e["activity"] = act
+            if len(b) > 81:
+                e["motion_state"] = {0: "WAKE", 1: "STILL", 2: "SLEEP",
+                                      3: "UP"}.get((b[81] >> 4) & 3)
     elif e.get("char", "").lower() == HR_MEAS_UUID:
         try:
             bpm, rr = parse_hr_measurement(b)
@@ -468,9 +504,22 @@ class Capture:
             self.range_info = None
             self.status = "running"
             self.started_at = time.strftime("%Y-%m-%d %H:%M:%S")
+            os.makedirs(os.path.join(REPO_ROOT, "captures"), exist_ok=True)
+            self.capture_path = os.path.join(
+                REPO_ROOT, "captures",
+                f"capture-{time.strftime('%Y%m%d-%H%M%S')}.jsonl")
+            self._fh = open(self.capture_path, "a", encoding="utf-8")
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
-        return {"ok": True, "status": "running"}
+        return {"ok": True, "status": "running",
+                "persisting": self.capture_path}
+
+    def _persist(self, rec):
+        """Write a record to disk BEFORE any acknowledgement (NOOP storage-
+        ownership contract: an ack may release device history)."""
+        self._fh.write(json.dumps(rec) + "\n")
+        self._fh.flush()
+        os.fsync(self._fh.fileno())
 
     def _set(self, status):
         with self.lock:
@@ -501,12 +550,29 @@ class Capture:
                         with self.lock:
                             self.range_info = b[13:].hex()
                     elif ptype == 49:
-                        kind = u16le(b, 10)
+                        kind = b[10] if len(b) > 10 else None
                         got = True
-                        if kind == 2:      # HistoryEnd -> ack so band advances
-                            br.send_command("historical_data_result")
-                        elif kind == 3:    # HistoryComplete
+                        if kind == 2 and len(b) >= 29:
+                            # HISTORY_END: echo the 8-byte token verbatim
+                            # (frame[21:29], per the Android ACK builder), but
+                            # ONLY after the chunk is persisted to disk — the
+                            # ack advances the band's trim boundary and may
+                            # release stored history (NOOP storage-ownership).
+                            token = b[21:29]
+                            first_word = struct.unpack_from("<I", token, 0)[0]
+                            if first_word == 0xFFFFFFFF:
+                                # special completion token — no ordinary ack
+                                self._set("done (completion token)")
+                                self._fh.close()
+                                return
+                            self._persist({"ts": e.get("ts"), "event": "history_end",
+                                           "token": token.hex()})
+                            time.sleep(0.3)
+                            br.send_command("historical_data_result",
+                                            "01" + token.hex())
+                        elif kind == 3:
                             self._set("done")
+                            self._fh.close()
                             return
                     elif ptype == 47:
                         got = True
@@ -515,21 +581,35 @@ class Capture:
                                "page": u32le(b, 12),
                                "unix": u32le(b, 16),
                                "body_hex": b[22:].hex() if len(b) > 22 else ""}
+                        self._persist(rec)
                         with self.lock:
                             self.frames.append(rec)
                 if got:
                     idle_since = time.time()
                 time.sleep(0.8)
-            self._set("timeout (no complete marker) — kept what arrived")
+            self._set("timeout (no complete marker) — kept what arrived; "
+                      f"persisted to {getattr(self, 'capture_path', '?')}")
+            try:
+                self._fh.close()
+            except Exception:
+                pass
         except Exception as ex:
             self._set(f"error: {ex}")
+            try:
+                self._fh.close()
+            except Exception:
+                pass
 
     def download_payload(self):
         with self.lock:
-            return json.dumps({"captured_at": self.started_at,
-                               "range_hex": self.range_info,
-                               "frame_count": len(self.frames),
-                               "frames": self.frames}, indent=1)
+            path = getattr(self, "capture_path", None)
+        if path and os.path.exists(path):
+            with open(path, "rb") as fh:
+                return fh.read()   # raw JSONL as persisted (safe to ack against)
+        return json.dumps({"captured_at": self.started_at,
+                           "range_hex": self.range_info,
+                           "frame_count": len(self.frames),
+                           "frames": self.frames}, indent=1).encode()
 
 
 CAPTURE = None
@@ -616,11 +696,12 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/capture/status":
                 self._json(CAPTURE.snapshot())
             elif u.path == "/api/capture/download":
-                data = CAPTURE.download_payload().encode()
+                data = CAPTURE.download_payload()
+                data = data.encode() if isinstance(data, str) else data
                 self.send_response(200)
-                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Type", "application/x-ndjson")
                 self.send_header("Content-Disposition",
-                                 'attachment; filename="whoop_capture.json"')
+                                 'attachment; filename="whoop_capture.jsonl"')
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
@@ -670,37 +751,51 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(ex)}, 200)
 
     def _haptics(self, body):
-        """Set an alarm with a custom haptic waveform; optionally run it now."""
+        """Two modes:
+        - pattern (default): ad-hoc buzz via cmd 19 — 12-byte body, no alarm
+          slot consumed: [01, 8 effects, u16 loop, u8 overall]
+        - alarm: set_alarm_time (21-byte record incl. crescendo) + optional run
+        Overall-repeat counts pulses AFTER the first (N-1 semantics, NOOP)."""
         import calendar
         waveform = body.get("waveform") or [47, 152, 0, 0, 0, 0, 0, 0]
         if len(waveform) != 8 or not all(isinstance(x, int) and 0 <= x <= 255 for x in waveform):
-            return {"error": "waveform must be 8 bytes (0-255)"}
-        alarm_id = int(body.get("alarm_id", 1))
-        if alarm_id < 1:
-            return {"error": "alarm IDs are 1-based"}
-        minutes = int(body.get("minutes", 5))
-        schedule = int(time.time()) + minutes * 60
+            return {"error": "waveform must be 8 bytes (0-255; effects <= 251)"}
         loop_control = int(body.get("loop", 0))
         overall = int(body.get("overall", 7))
+
+        if body.get("mode", "pattern") == "pattern":
+            payload = bytes([1]) + bytes(waveform)
+            payload += struct.pack("<H", loop_control) + bytes([overall])
+            seq = BRIDGE.next_seq()
+            frame = build_v5_frame(seq, 19, payload)
+            r = BRIDGE.write_raw(frame.hex())
+            return {"set": r, "frame": frame.hex(), "seq": seq,
+                    "note": f"ad-hoc pattern: ~{overall + 1} pulses"}
+
+        alarm_id = int(body.get("alarm_id", 1))
+        if alarm_id < 1 or alarm_id > 6:
+            return {"error": "alarm IDs are 1-6"}
+        minutes = int(body.get("minutes", 5))
+        schedule = int(time.time()) + minutes * 60
         duration = int(body.get("duration", 30))
+        crescendo = int(body.get("crescendo", 0))
 
         payload = bytes([4, alarm_id])
         payload += struct.pack("<I", schedule)
         payload += struct.pack("<H", 0)
         payload += bytes(waveform)
         payload += struct.pack("<H", loop_control)
-        payload += bytes([overall, duration])
+        payload += bytes([overall, duration, crescendo])
 
         seq = BRIDGE.next_seq()
         frame = build_v5_frame(seq, 66, payload)
         r = BRIDGE.write_raw(frame.hex())
         result = {"set": r, "frame": frame.hex(), "seq": seq,
                   "schedule_unix": schedule,
-                  "note": f"alarm {alarm_id} set for +{minutes}min"}
+                  "note": f"alarm {alarm_id} set for +{minutes}min (crescendo={crescendo})"}
         if body.get("run_now"):
             time.sleep(0.5)
-            run = BRIDGE.send_command("run_alarm",
-                                      f"02{alarm_id:02x}")
+            run = BRIDGE.send_command("run_alarm", f"02{alarm_id:02x}")
             result["run"] = run
         return result
 
@@ -815,16 +910,18 @@ PAGE = r"""<!DOCTYPE html>
     <div id="miniconsole"></div>
 
     <h2>Haptics lab</h2>
-    <div class="hint">waveform = 8 effect slots ([47,152] is the WHOOP default pair). Alarm set for +N minutes, then optionally run now.</div>
+    <div class="hint">waveform = 8 effect slots ([47,152] is the WHOOP default pair; effects <= 251). Overall = pulses AFTER the first (N-1). "BUZZ" uses ad-hoc cmd 19 — no alarm slot. "Set alarm" writes the 21-byte record (slots 1-6, crescendo optional) and can run it now.</div>
     <div class="slots" id="slots"></div>
     <label>loop <input type="number" id="hloop" value="0"></label>
-    <label>overall <input type="number" id="hoverall" value="7"></label>
-    <label>duration(s) <input type="number" id="hdur" value="30"></label>
-    <label>alarm id <input type="number" id="hid" value="1" min="1"></label>
+    <label>overall <input type="number" id="hoverall" value="2"></label>
+    <label>alarm id <input type="number" id="hid" value="1" min="1" max="6"></label>
     <label>+min <input type="number" id="hmin" value="5"></label>
+    <label>dur(s) <input type="number" id="hdur" value="30"></label>
+    <label>crescendo <select id="hcres"><option value="0">0 (pattern)</option><option value="1">1 (staged)</option></select></label>
     <div style="margin-top:.4rem; display:flex; gap:.5rem">
-      <button class="big go" onclick="haptics(false)">Set alarm</button>
-      <button class="big buzz" onclick="haptics(true)">Set + BUZZ NOW</button>
+      <button class="big buzz" onclick="haptics('pattern')">BUZZ NOW</button>
+      <button class="big go" onclick="haptics('alarm', true)">Set + alarm now</button>
+      <button class="cmd" onclick="api('/api/send',{method:'POST',body:JSON.stringify({name:'stop_haptics'})}).then(r=>mini('stop → '+JSON.stringify(r)))">Stop</button>
     </div>
 
     <h2>Historical grab</h2>
@@ -855,9 +952,9 @@ function rowLine(e) {
   if (e.kind === 'info') return `<div class="row ${cls}" style="color:#8be9a8">${e.ts || ''} <span class="tag">info</span>${e.desc || ''}</div>`;
   if (e.event_name) extra = `<span class="tag ev">${e.event_name}</span>`;
   else if (e.result) extra = `<span class="tag rsp">${e.result}${e.haptics ? ' / ' + e.haptics : ''}</span>`;
-  else if (e.meta) extra = `<span class="tag">${e.meta}</span>`;
+  else if (e.meta) extra = `<span class="tag">${e.meta}${e.end_token ? ' ' + e.end_token : ''}</span>`;
+  else if (e.hr) extra = `<span class="tag hrv">HR ${e.hr}${e.rr_ms ? ' · RR ' + e.rr_ms.join(',') : ''}${e.skin_temp_c ? ' · ' + e.skin_temp_c + '°C' : ''}${e.steps !== undefined ? ' · steps ' + e.steps : ''}${e.activity ? ' · ' + e.activity : ''}${e.motion_state ? ' · ' + e.motion_state : ''}</span>`;
   else if (e.type_name) extra = `<span class="tag">${e.type_name}${e.domain ? ' ' + e.domain : ''}</span>`;
-  else if (e.hr) extra = `<span class="tag hrv">HR ${e.hr}${e.rr_ms ? ' RR ' + e.rr_ms.length : ''}</span>`;
   return `<div class="row ${cls}">${e.ts || ''} <span class="tag">${e.kind}</span>${extra}${e.hex || ''}</div>`;
 }
 function pollLog() {
@@ -946,8 +1043,8 @@ async function sendCmd(name, payload) {
   const entry = catalog[name];
   let p = (payload === undefined || payload === null) ? entry[1] : payload;
   if (p === null) { p = prompt('payload hex required for ' + name); if (!p) return; }
-  const stateChanging = !/^get_|get_hello/.test(name) && name !== 'get_hello';
-  if (stateChanging && !confirm(`Send ${name} (payload ${p})?`)) return;
+  const safe = /^get_/.test(name) || name === 'link_valid';
+  if (!safe && !confirm(`Send ${name} (payload ${p})?\n\n${entry[2]}`)) return;
   const r = await api('/api/send', {method: 'POST', body: JSON.stringify({name, payload: p})});
   mini(`send ${name} → ${JSON.stringify(r)}`);
 }
@@ -980,12 +1077,15 @@ async function stopAll() {
   if (!confirm('Send the full stopPhysiologyCapture sequence (all streams OFF)?')) return;
   mini('STOP sequence → ' + JSON.stringify(await api('/api/stop', {method:'POST'})));
 }
-function haptics(runNow) {
+function haptics(mode, runNow) {
   const wf = [...document.querySelectorAll('#slots input')].map(i => parseInt(i.value || '0'));
   const body = { waveform: wf, loop: +hloop.value, overall: +hoverall.value,
-                 duration: +hdur.value, alarm_id: +hid.value, minutes: +hmin.value,
-                 run_now: runNow };
-  if (runNow && !confirm(`Set alarm ${hid.value} with waveform [${wf}] and BUZZ the band NOW?`)) return;
+                 duration: +hdur.value, crescendo: +hcres.value,
+                 alarm_id: +hid.value, minutes: +hmin.value,
+                 mode: mode, run_now: !!runNow };
+  const label = mode === 'pattern' ? 'BUZZ the band NOW (ad-hoc pattern)'
+                                   : `Set alarm ${hid.value} and run NOW`;
+  if (!confirm(label + `?\nwaveform [${wf}] overall ${hoverall.value}`)) return;
   api('/api/haptics', {method: 'POST', body: JSON.stringify(body)})
     .then(r => mini('haptics → ' + JSON.stringify(r)));
 }
