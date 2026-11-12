@@ -469,7 +469,18 @@ def main():
     p = sub.add_parser("commands", help="list the reverse-engineered command catalog")
     p.set_defaults(func=cmd_commands)
 
+    p = sub.add_parser("dashboard", help="launch the browser dashboard (frontend to any bridge)")
+    p.add_argument("--bridge", default="http://localhost:8443",
+                   help="bridge base URL (default %(default)s)")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8000)
+    p.set_defaults(func=None)  # handled specially in main()
+
     args = parser.parse_args()
+    if args.command == "dashboard":
+        from dashboard import main as dashboard_main
+        dashboard_main(args)
+        return
     asyncio.run(args.func(args))
 
 

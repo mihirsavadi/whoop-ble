@@ -2,3 +2,15 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+certs/
+bridge_run.log
+
+# Android (bridges/android-bridge/)
+local.properties
+.idea/
+.gradle/
+build/
+app/build/
+*.apk
+dashboard_run.log
+sweep_tmp.py
