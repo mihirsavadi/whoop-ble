@@ -533,15 +533,34 @@ the captured hello), `find_whoop`, `connect_to_whoop`, `parse_hr_measurement`,
 - **[OpenWHOOP](https://github.com/pywebguru/OpenWHOOP)** — the WHOOP 4.0
   reverse-engineering project Goose references.
 
-## Upstream tracking (do this periodically)
+## Upstream tracking (notifications, all wired up)
 
-Upstream is the source of truth — **check on it once in a while**:
+Upstream is the source of truth for new protocol knowledge — and the repo
+now has an **automated canary** plus manual watch points, so revival or
+successor activity finds you:
 
-- <https://github.com/b-nnett/goose> — currently **ARCHIVED** (read-only).
-  If revived or forked, new WHOOP 5.0 discoveries land there first.
-- Watch for: new command numbers, packet-semantics decoding
-  (sleep/SpO2/temp), frame-format changes, anything about pairing flows.
-- Integrate findings via the checklist in the agent appendix below.
+**Automated (built in):** `.github/workflows/upstream-watch.yml` runs
+weekly (Mondays 12:00 UTC, also manually via *workflow_dispatch*). It
+checks three signals — upstream HEAD movement, the archived flag
+flipping, and **forks with recent pushes** (successor-project
+candidates) — and when something moves it opens/comments an issue in
+*this* repo labeled `upstream-watch` (deduped, state committed by CI).
+**Watch this repo** (GitHub → Watch → All activity) and you get pinged
+the moment there's anything to integrate. The integration checklist is
+in the agent appendix below.
+
+**Manual, if you want more:**
+* Watch the upstream directly: <https://github.com/b-nnett/goose> →
+  Watch → Custom (commits + releases) — fires if it's ever unarchived
+* Upstream commit feed (RSS):
+  <https://github.com/b-nnett/goose/commits/main.atom> — subscribe in
+  any feed reader
+* Fork network, sorted by recent activity — where a successor project
+  will show up first: <https://github.com/b-nnett/goose/forks?include=active>
+
+For context: upstream is currently **ARCHIVED** (read-only) — but at
+the time of writing, 5 forks have pushed within the last 30 days, so
+the ecosystem is alive.
 
 ---
 
