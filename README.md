@@ -258,3 +258,108 @@ historical sync (type 47); their semantics are open research.
   in this repo comes from its source.
 - **[OpenWHOOP](https://github.com/pywebguru/OpenWHOOP)** — the WHOOP 4.0
   reverse-engineering project Goose references.
+
+## Upstream tracking (do this periodically)
+
+This repo is a distillation of upstream reverse-engineering. **The upstream
+is the source of truth — check on it once in a while**:
+
+- <https://github.com/b-nnett/goose> — note: the repo is currently
+  **ARCHIVED** (read-only). If it is revived, or forked/succeeded by a new
+  project, new WHOOP 5.0 discoveries would land there first.
+- Watch specifically for: **new command numbers**, new notification packet
+  semantics (sleep/SpO2/temp decoding), changes to the frame format, and
+  anything about the pairing/bonding flow.
+- When something new appears upstream, integrate it here via the checklist in
+  the agent appendix below (*"Integrating new upstream findings"*).
+
+---
+
+## Appendix: for AI agents
+
+This repo is expected to be read, traversed, and modified by AI agents. This
+section is the orientation brief for that.
+
+### Repo map (it's tiny — read everything)
+
+```
+whoop-ble/
+├── README.md       ← you are here; protocol reference + this appendix
+├── whoop_ble.py    ← the entire toolkit (one file, ~450 lines)
+└── .gitignore
+```
+
+### Execution environment gotchas
+
+- The host runs **WSL on Windows**. Bluetooth is owned by Windows, so BLE
+  commands must run under the **Windows Python**: `python.exe whoop_ble.py ...`
+  from WSL in this directory (it's a Dropbox path, visible to both sides).
+- `python.exe` here is Python 3.14 with `bleak` already installed.
+  WSL's own `python3` cannot reach the radio and does not have bleak.
+- Offline subcommands (`frame`, `commands`, `send --dry-run`) run anywhere.
+- The band is at `C2:51:BC:8F:B2:28` (as of writing; BLE random addresses
+  can rotate — always `scan` first rather than hardcoding).
+
+### Where things live in `whoop_ble.py`
+
+| Thing | Location |
+|---|---|
+| Service/characteristic UUIDs | module constants at top |
+| Command catalog (name → number/payload/description) | `COMMAND_CATALOG` |
+| Frame format + CRCs | `crc16_modbus`, `build_v5_frame` |
+| Frame peek for notifications | `describe_frame` |
+| HR measurement parsing | `parse_hr_measurement` |
+| Scan/connect plumbing | `find_whoop`, `connect_to_whoop` |
+| Subcommand handlers | `cmd_scan`, `cmd_info`, `cmd_hr`, `cmd_hello`, `cmd_send`, `cmd_frame`, `cmd_commands` |
+
+### Ground truth you must not break
+
+- `build_v5_frame(1, 145, b"\x01")` MUST produce
+  `aa0108000001e67123019101363e5c8d` (the captured known-good hello).
+  This is the regression test — run it after touching any frame code:
+  `python.exe whoop_ble.py frame 1 145 01`
+- All constants come from the Goose repo (see Upstream tracking). Do not
+  invent command numbers or payloads; only add what upstream documents.
+
+### Integrating new upstream findings (checklist)
+
+1. Find the new command/constant in Goose source:
+   - Command numbers & payloads: `GooseSwift/GooseBLEClient.swift`
+     (enums `SensorStreamCommandKind`, `HistoricalCommandKind`, `AlarmCommandKind`,
+     `ClockCommandKind`, plus `debugResearchCommandDefinitions` for debug reads)
+   - Packet types & frame parsing: `Rust/core/src/protocol.rs`
+   - Undecoded/TODO semantics: `docs/goose-swift-mvp/RemainingDataTodo.md`
+2. Add an entry to `COMMAND_CATALOG` in `whoop_ble.py`
+   (`"name": (number, default_payload_hex_or_None, "description")`).
+3. Document it in the README command-catalog tables (same row format).
+4. If it's a new packet type, add it to `PACKET_TYPE_NAMES` + README packet table.
+5. Verify offline: `python.exe whoop_ble.py send <name> --dry-run` and
+   `python.exe whoop_ble.py commands`.
+6. If BLE is available and the band is paired: live-test with
+   `send <name>` and watch notifications.
+7. Update the status table at the top of the README.
+
+### Live-testing procedure (band present)
+
+1. Confirm the band advertises: `python.exe whoop_ble.py scan --seconds 20`
+   — if nothing appears, phone Bluetooth is probably holding the band
+   (ask the user to turn it off).
+2. `python.exe whoop_ble.py info` — proves connect + standard reads.
+3. `python.exe whoop_ble.py hello` — the auth gate test. If subscriptions to
+   `fd4b0003-...` fail with **Insufficient Authentication**, the custom
+   service is still locked: the host is not bonded. Everything else will
+   fail identically until the OS-level pairing succeeds — don't chase
+   protocol bugs when this gate is tripped.
+4. Pairing state can be checked in the Windows registry:
+   `HKLM\SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Devices\<mac>`
+   — a bond requires an LTK value; a Name alone means a failed exchange.
+
+### Safety rules for agents
+
+- Never send `set_*`/state-changing commands (clock, alarms, sensor toggles)
+  to the band without explicit user confirmation for that specific command.
+- Reads (`get_*`) and the hello are safe.
+- `toggle_*` commands change what the band is streaming and can affect the
+  official app's sync behavior — confirm before sending.
+- Do not remove or alter the "not affiliated with WHOOP / reverse-engineered,
+  use at your own risk" disclaimers.
